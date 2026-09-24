@@ -745,7 +745,7 @@ file sealed record Options(
           --all-devices               Run UU/UL/VU/VL/WU/WL, IGBT then FRD at each position
           --device NAME               Run one device only (mutually exclusive with --all-devices)
           --trigger-channel HOTTEST    Hot threshold source; batch default is hottest CH1 channel
-                                       Single-device default remains CH1_1; CH1_1..CH1_13 accepted
+                                       Single-device default remains CH1_1; CH1_1..CH1_12 accepted
           --trigger-c 30              Minimum hot-equilibrium temperature
           --window-min 5              Equilibrium observation window
           --max-span-c 0.2            Maximum span in window, every temperature channel
