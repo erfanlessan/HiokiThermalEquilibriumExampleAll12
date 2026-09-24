@@ -87,7 +87,7 @@ static async Task<int> RunAsync(string[] args)
         if (!options.PreserveInputSettings)
         {
             Console.WriteLine(
-                $"Configuring CH1_1..CH1_13 and CH2_7 as type-{options.ThermocoupleType} " +
+                $"Configuring CH1_1..CH1_12 and CH2_7 as type-{options.ThermocoupleType} " +
                 $"thermocouples on the {options.TemperatureRangeC:0} °C range.");
             await logger.ConfigureThermocoupleChannelsAsync(
                 temperatureChannels,
@@ -616,17 +616,17 @@ file sealed record DeviceRun(
     public static IReadOnlyList<DeviceRun> All { get; } =
     [
         new("01_UU_IGBT", "U upper IGBT", HeaterDevice.IgbtUUpper, MonitorRelaySelection.None),
-        new("02_UU_FRD", "U upper diode/FRD", HeaterDevice.DiodeUUpper, MonitorRelaySelection.Diode),
-        new("03_UL_IGBT", "U lower IGBT", HeaterDevice.IgbtULower, MonitorRelaySelection.Igbt),
-        new("04_UL_FRD", "U lower diode/FRD", HeaterDevice.DiodeULower, MonitorRelaySelection.Diode),
-        new("05_VU_IGBT", "V upper IGBT", HeaterDevice.IgbtVUpper, MonitorRelaySelection.Igbt),
-        new("06_VU_FRD", "V upper diode/FRD", HeaterDevice.DiodeVUpper, MonitorRelaySelection.Diode),
-        new("07_VL_IGBT", "V lower IGBT", HeaterDevice.IgbtVLower, MonitorRelaySelection.Igbt),
-        new("08_VL_FRD", "V lower diode/FRD", HeaterDevice.DiodeVLower, MonitorRelaySelection.Diode),
-        new("09_WU_IGBT", "W upper IGBT", HeaterDevice.IgbtWUpper, MonitorRelaySelection.Igbt),
-        new("10_WU_FRD", "W upper diode/FRD", HeaterDevice.DiodeWUpper, MonitorRelaySelection.Diode),
-        new("11_WL_IGBT", "W lower IGBT", HeaterDevice.IgbtWLower, MonitorRelaySelection.Igbt),
-        new("12_WL_FRD", "W lower diode/FRD", HeaterDevice.DiodeWLower, MonitorRelaySelection.Diode)
+        new("02_UU_FRD", "U upper diode/FRD", HeaterDevice.DiodeUUpper, MonitorRelaySelection.None),
+        new("03_UL_IGBT", "U lower IGBT", HeaterDevice.IgbtULower, MonitorRelaySelection.None),
+        new("04_UL_FRD", "U lower diode/FRD", HeaterDevice.DiodeULower, MonitorRelaySelection.None),
+        new("05_VU_IGBT", "V upper IGBT", HeaterDevice.IgbtVUpper, MonitorRelaySelection.None),
+        new("06_VU_FRD", "V upper diode/FRD", HeaterDevice.DiodeVUpper, MonitorRelaySelection.None),
+        new("07_VL_IGBT", "V lower IGBT", HeaterDevice.IgbtVLower, MonitorRelaySelection.None),
+        new("08_VL_FRD", "V lower diode/FRD", HeaterDevice.DiodeVLower, MonitorRelaySelection.None),
+        new("09_WU_IGBT", "W upper IGBT", HeaterDevice.IgbtWUpper, MonitorRelaySelection.None),
+        new("10_WU_FRD", "W upper diode/FRD", HeaterDevice.DiodeWUpper, MonitorRelaySelection.None),
+        new("11_WL_IGBT", "W lower IGBT", HeaterDevice.IgbtWLower, MonitorRelaySelection.None),
+        new("12_WL_FRD", "W lower diode/FRD", HeaterDevice.DiodeWLower, MonitorRelaySelection.None)
     ];
 
     public static DeviceRun ForDevice(HeaterDevice device)
@@ -681,8 +681,8 @@ file sealed record Options(
         string triggerChannel = Get(values, "--trigger-channel", allDevices ? "HOTTEST" : "CH1_1")!
             .ToUpperInvariant();
         if (triggerChannel != "HOTTEST" &&
-            !Enumerable.Range(1, 13).Select(n => $"CH1_{n}").Contains(triggerChannel))
-            throw new ArgumentException("--trigger-channel must be HOTTEST or CH1_1 through CH1_13.");
+            !Enumerable.Range(1, 12).Select(n => $"CH1_{n}").Contains(triggerChannel))
+            throw new ArgumentException("--trigger-channel must be HOTTEST or CH1_1 through CH1_12.");
 
         string? scope1Resource = Get(values, "--scope1", null);
         string? scope2Resource = Get(values, "--scope2", null);
