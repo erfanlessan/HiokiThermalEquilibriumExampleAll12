@@ -351,3 +351,5 @@ MigrationBackup/
 *.html
 
 *.txt
+HiokiThermalEquilibriumExample.sln
+*.svg

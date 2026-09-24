@@ -26,7 +26,7 @@ static async Task<int> RunAsync(string[] args)
         return 0;
     }
 
-    string[] equilibriumChannels = Enumerable.Range(1, 13).Select(n => $"CH1_{n}").ToArray();
+    string[] equilibriumChannels = Enumerable.Range(1, 12).Select(n => $"CH1_{n}").ToArray();
     string[] voltageChannels = Enumerable.Range(1, 6).Select(n => $"CH2_{n}").ToArray();
     const string ambientChannel = "CH2_7";
     string[] temperatureChannels = [.. equilibriumChannels, ambientChannel];
@@ -604,7 +604,7 @@ file sealed record DeviceRun(
 {
     public static IReadOnlyList<DeviceRun> All { get; } =
     [
-        new("01_UU_IGBT", "U upper IGBT", HeaterDevice.IgbtUUpper, MonitorRelaySelection.Igbt),
+        new("01_UU_IGBT", "U upper IGBT", HeaterDevice.IgbtUUpper, MonitorRelaySelection.None),
         new("02_UU_FRD", "U upper diode/FRD", HeaterDevice.DiodeUUpper, MonitorRelaySelection.Diode),
         new("03_UL_IGBT", "U lower IGBT", HeaterDevice.IgbtULower, MonitorRelaySelection.Igbt),
         new("04_UL_FRD", "U lower diode/FRD", HeaterDevice.DiodeULower, MonitorRelaySelection.Diode),
