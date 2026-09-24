@@ -27,7 +27,7 @@ static async Task<int> RunAsync(string[] args)
     }
 
     string[] equilibriumChannels = Enumerable.Range(1, 12).Select(n => $"CH1_{n}").ToArray();
-    string[] voltageChannels = Enumerable.Range(1, 6).Select(n => $"CH2_{n}").ToArray();
+    string[] voltageChannels = [.. Enumerable.Range(1, 6).Select(n => $"CH2_{n}"), "CH2_8"];
     const string ambientChannel = "CH2_7";
     string[] temperatureChannels = [.. equilibriumChannels, ambientChannel];
     string[] recordingChannels = [.. equilibriumChannels, .. voltageChannels, ambientChannel];
@@ -39,7 +39,8 @@ static async Task<int> RunAsync(string[] args)
         ["CH2_4"] = "CH2_4_VL_V",
         ["CH2_5"] = "CH2_5_WU_V",
         ["CH2_6"] = "CH2_6_WL_V",
-        [ambientChannel] = "CH2_7_Ambient_degC"
+        [ambientChannel] = "CH2_7_Ambient_degC",
+        ["CH2_8"] = "CH2_8_Thermistor_V"
     };
 
     TimeSpan sampleInterval = TimeSpan.FromMilliseconds(100);
@@ -98,9 +99,16 @@ static async Task<int> RunAsync(string[] args)
 
             Console.WriteLine("Configuring CH2_1..CH2_6 as voltage inputs on the 2 V range, scaling OFF.");
             await logger.ConfigureVoltageChannelsAsync(
-                voltageChannels,
+                Enumerable.Range(1,6).Select(n=> $"CH2_{n}").ToArray(),
                 voltageRangeV: 2,
                 cancellationToken: cancellation.Token);
+
+            Console.WriteLine("Configuring CH2_8 as a voltage input on the X V range, scaling OFF");
+            await logger.ConfigureVoltageChannelsAsync(
+                ["CH2_8"],
+                voltageRangeV: 4,
+                cancellationToken: cancellation.Token);
+
             await logger.SendAsync(":UNIT:FILTER 50HZ", cancellation.Token);
         }
         else
@@ -602,6 +610,9 @@ static void WriteLiveDashboard(string path)
 file sealed record DeviceRun(
     string FolderName, string DisplayName, HeaterDevice Device, MonitorRelaySelection MonitorRelay)
 {
+    /// <summary>
+    ///  IReadOnlyList sets up the relays to be turned on. 
+    /// </summary>
     public static IReadOnlyList<DeviceRun> All { get; } =
     [
         new("01_UU_IGBT", "U upper IGBT", HeaterDevice.IgbtUUpper, MonitorRelaySelection.None),
