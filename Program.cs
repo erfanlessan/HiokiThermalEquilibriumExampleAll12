@@ -1,3 +1,4 @@
+// Claude commit access check - confirms Claude can push to GitHub from this session.
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
