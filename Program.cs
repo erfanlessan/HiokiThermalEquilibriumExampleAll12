@@ -1,3 +1,5 @@
+// Batch thermal-characterisation runner for the Hioki LR8400 data logger.
+// Full narrative walkthrough: see PROGRAM_GUIDE.md in the repository root.
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
@@ -6,6 +8,8 @@ using HiokiThermalEquilibriumExample;
 
 return await RunAsync(args);
 
+// Entry point for the whole program. Parses CLI options, connects to the
+// instruments, then runs one heating/cooling cycle per device in the plan.
 static async Task<int> RunAsync(string[] args)
 {
     Options options;
@@ -15,6 +19,7 @@ static async Task<int> RunAsync(string[] args)
     }
     catch (Exception exception)
     {
+        // Bad arguments: print the error plus usage, then exit without touching hardware.
         Console.Error.WriteLine(exception.Message);
         Options.PrintUsage();
         return 2;
@@ -26,11 +31,16 @@ static async Task<int> RunAsync(string[] args)
         return 0;
     }
 
+    // --- LR8400 channel map -------------------------------------------------
+    // Unit 1 (CH1_1..CH1_12): one thermocouple per heated device.
+    // Unit 2 (CH2_1..CH2_6): phase-voltage sensing, one per physical position.
+    // CH2_7: ambient reference thermocouple. CH2_8: thermistor voltage input.
     string[] equilibriumChannels = Enumerable.Range(1, 12).Select(n => $"CH1_{n}").ToArray();
     string[] voltageChannels = [.. Enumerable.Range(1, 6).Select(n => $"CH2_{n}"), "CH2_8"];
     const string ambientChannel = "CH2_7";
     string[] temperatureChannels = [.. equilibriumChannels, ambientChannel];
     string[] recordingChannels = [.. equilibriumChannels, .. voltageChannels, ambientChannel];
+    // Friendly column headings used in the CSV export and SVG plot legends.
     Dictionary<string, string> channelLabels = new(StringComparer.OrdinalIgnoreCase)
     {
         ["CH2_1"] = "CH2_1_UU_V",
@@ -47,12 +57,17 @@ static async Task<int> RunAsync(string[] args)
     TimeSpan livePollInterval = TimeSpan.FromSeconds(1);
     string outputRoot = Path.GetFullPath(options.OutputDirectory);
     Directory.CreateDirectory(outputRoot);
+    // These three files are overwritten continuously while a run is in progress,
+    // so a browser tab open on live-dashboard.html shows near-real-time status.
     string liveTemperaturePath = Path.Combine(outputRoot, "live-temperatures.svg");
     string liveVoltagePath = Path.Combine(outputRoot, "live-voltages.svg");
     string liveStatusPath = Path.Combine(outputRoot, "live-status.txt");
     WriteLiveDashboard(Path.Combine(outputRoot, "live-dashboard.html"));
 
+    // The run plan is either all twelve devices or a single device (see Options.BuildRunPlan).
     IReadOnlyList<DeviceRun> plan = options.BuildRunPlan();
+    // Empty when no --scope1/--scope2 were supplied; every RTH-related block below
+    // is skipped in that case, so the program works fine without any scope attached.
     IReadOnlyList<RthScopeDefinition> scopeDefinitions = options.BuildScopeDefinitions();
     RthCaptureSettings scopeSettings = new(
         options.ScopeTimeRangeMilliseconds / 1000.0,
@@ -61,6 +76,8 @@ static async Task<int> RunAsync(string[] args)
         TimeSpan.FromMilliseconds(options.ScopePreTriggerFillMilliseconds),
         TimeSpan.FromMilliseconds(options.ScopePostTriggerWaitMilliseconds));
 
+    // Ctrl+C requests a graceful stop instead of killing the process outright,
+    // so the finally block below still gets a chance to switch the heater off.
     using CancellationTokenSource cancellation = new();
     Console.CancelKeyPress += (_, eventArgs) =>
     {
@@ -76,6 +93,8 @@ static async Task<int> RunAsync(string[] args)
 
     try
     {
+        // Every code path below this point can leave heater outputs energised if it
+        // throws, which is why the finally block unconditionally commands all-off.
         Console.WriteLine($"Opening Arduino on {options.ArduinoPort} at {options.ArduinoBaudRate} baud ...");
         await heater.OpenAsync(cancellation.Token);
         Console.WriteLine("Arduino connected; all heater outputs are OFF.");
@@ -86,6 +105,10 @@ static async Task<int> RunAsync(string[] args)
 
         if (!options.PreserveInputSettings)
         {
+            // Put every analogue input into a known state before recording starts.
+            // CH1_1..CH1_12 + CH2_7 (ambient) are thermocouples; CH2_1..CH2_6 and
+            // CH2_8 are voltage inputs. CH2_8 gets its own call because it uses a
+            // different voltage range (4 V) than the phase-voltage channels (2 V).
             Console.WriteLine(
                 $"Configuring CH1_1..CH1_12 and CH2_7 as type-{options.ThermocoupleType} " +
                 $"thermocouples on the {options.TemperatureRangeC:0} °C range.");
@@ -113,11 +136,16 @@ static async Task<int> RunAsync(string[] args)
         }
         else
         {
+            // --preserve-input-settings: trust whatever channel configuration the
+            // LR8400 already has (useful when it was set up once and left alone).
             Console.WriteLine("Preserving the LR8400 input modes, sensors, ranges and RJC settings.");
         }
 
         if (scopeDefinitions.Count > 0)
         {
+            // Optional: connect and arm one or two R&S Scope Rider RTH instruments
+            // that capture the fast electrical transient at heater switch-off.
+            // See RthScopeCapture.cs for the SCPI-level implementation.
             Console.WriteLine($"Connecting to {scopeDefinitions.Count} configured RTH scope(s) ...");
             scopes = await RthScopeCoordinator.ConnectAvailableAsync(
                 scopeDefinitions, Console.WriteLine, cancellation.Token);
@@ -139,6 +167,13 @@ static async Task<int> RunAsync(string[] args)
         Console.WriteLine($"Output root: {outputRoot}");
         Console.WriteLine($"Run plan: {string.Join(", ", plan.Select(item => item.FolderName))}");
 
+        // ---------------------------------------------------------------------
+        // Main batch loop: one heating + cooling cycle per device in the plan.
+        // Each iteration is broken into three phases:
+        //   1. Heating   - energise the device until it reaches hot equilibrium.
+        //   2. Cooling   - keep recording until the device is back near ambient.
+        //   3. Export    - download the LR8400 recording and save CSV/SVG files.
+        // ---------------------------------------------------------------------
         for (int runIndex = 0; runIndex < plan.Count; runIndex++)
         {
             DeviceRun run = plan[runIndex];
@@ -153,6 +188,8 @@ static async Task<int> RunAsync(string[] args)
             Console.WriteLine($"\n=== Run {runIndex + 1}/{plan.Count}: {run.DisplayName} ({run.FolderName}) ===");
             Console.ResetColor();
 
+            // Start a fresh continuous recording for this device before touching
+            // the heater relays, so the very first heater-on transient is captured.
             await heater.AllOffAsync(CancellationToken.None);
             await logger.ConfigureContinuousAcquisitionAsync(
                 new Lr8400ContinuousAcquisitionRequest
@@ -168,6 +205,9 @@ static async Task<int> RunAsync(string[] args)
             measurementStarted = true;
             await WaitForRecordingStateAsync(logger, TimeSpan.FromSeconds(3), cancellation.Token);
 
+            // Select the Arduino relay routing for this device (see HeaterRouting.Build)
+            // and switch heating on. The monitor-relay flag is currently disabled
+            // (MonitorRelaySelection.None) for every device - see DeviceRun.All below.
             ArduinoOutput route = HeaterRouting.Build(run.Device, run.MonitorRelay);
             Console.WriteLine(
                 $"Selecting {run.Device}; automatic monitor mode={run.MonitorRelay}; " +
@@ -182,6 +222,9 @@ static async Task<int> RunAsync(string[] args)
             Console.ResetColor();
             WriteStatus(liveStatusPath, $"Run {runIndex + 1}/{plan.Count}: {run.DisplayName} - heating");
 
+            // --- Heating phase: poll every second until the device-temperature
+            // channels are stable (EquilibriumDetector) AND the trigger channel has
+            // reached the configured hot threshold.
             EquilibriumDetector hotDetector = NewEquilibriumDetector(equilibriumChannels, options);
             Stopwatch heatingTimer = Stopwatch.StartNew();
             Stopwatch displayTimer = Stopwatch.StartNew();
@@ -201,6 +244,8 @@ static async Task<int> RunAsync(string[] args)
                     snapshot, equilibriumChannels, options.TriggerTemperatureChannel);
                 double triggerTemperature = triggerReading.Value;
 
+                // Safety net: never let a device heat for longer than --max-heating-min,
+                // even if it somehow never reports a stable equilibrium.
                 if (heatingTimer.Elapsed >= TimeSpan.FromMinutes(options.MaximumHeatingMinutes))
                 {
                     await heater.AllOffAsync(CancellationToken.None);
@@ -208,8 +253,11 @@ static async Task<int> RunAsync(string[] args)
                         $"Maximum heating time was reached during {run.FolderName}. All outputs are OFF.");
                 }
 
+                // Hard overtemperature cutoff (--safety-max-c), independent of equilibrium logic.
                 CheckSafetyLimit(snapshot, temperatureChannels, options.SafetyMaximumTemperatureC);
 
+                // Periodic console status line (every ~10 s) so a human watching the
+                // terminal can see progress without flooding the log every second.
                 if (displayTimer.Elapsed >= TimeSpan.FromSeconds(10))
                 {
                     string stability = equilibrium.IsEquilibrium
@@ -223,6 +271,7 @@ static async Task<int> RunAsync(string[] args)
                     displayTimer.Restart();
                 }
 
+                // Periodic SVG refresh for the live-dashboard.html page.
                 if (plotTimer.Elapsed >= TimeSpan.FromSeconds(options.LivePlotRefreshSeconds))
                 {
                     WriteLivePlots(liveTemperaturePath, liveVoltagePath, liveHistory,
@@ -230,6 +279,8 @@ static async Task<int> RunAsync(string[] args)
                     plotTimer.Restart();
                 }
 
+                // Temperatures are stable but haven't reached the hot threshold yet -
+                // warn once so it's obvious heating is intentionally continuing.
                 if (equilibrium.IsEquilibrium && triggerTemperature < options.TriggerTemperatureC)
                 {
                     if (!lowTemperatureWarningShown)
@@ -248,6 +299,11 @@ static async Task<int> RunAsync(string[] args)
                     lowTemperatureWarningShown = false;
                 }
 
+                // Hot equilibrium reached: arm any connected scopes, record the exact
+                // LR8400 sample index, then physically switch the heater off. The RTH
+                // scopes trigger on the real electrical edge, not on this LAN command,
+                // so the arm-then-switch-off ordering here just needs to happen before
+                // the edge occurs, with enough pre-trigger memory already filled.
                 if (equilibrium.IsEquilibrium && triggerTemperature >= options.TriggerTemperatureC)
                 {
                     bool scopesArmed = false;
@@ -264,6 +320,7 @@ static async Task<int> RunAsync(string[] args)
                         }
                         catch (Exception exception)
                         {
+                            // A scope failing to arm must never block the heater shutdown itself.
                             Console.Error.WriteLine(
                                 "WARNING: RTH arming failed; heater shutdown still proceeds. " + exception.Message);
                         }
@@ -298,6 +355,9 @@ static async Task<int> RunAsync(string[] args)
                 await Task.Delay(livePollInterval, cancellation.Token);
             }
 
+            // --- Cooling phase: keep recording (heater already off) until the
+            // device has been stable for the equilibrium window AND every device
+            // channel is within --ambient-tolerance-c of the ambient channel.
             EquilibriumDetector coolingDetector = NewEquilibriumDetector(temperatureChannels, options);
             Stopwatch coolingTimer = Stopwatch.StartNew();
             displayTimer.Restart();
@@ -311,6 +371,7 @@ static async Task<int> RunAsync(string[] args)
                 coolingDetector.Add(snapshot);
                 EquilibriumResult coolingEquilibrium = coolingDetector.Evaluate();
                 double ambient = snapshot.Values[ambientChannel];
+                // Which device channel is currently furthest from ambient, and by how much.
                 KeyValuePair<string, double> worstAmbientDifference = equilibriumChannels
                     .Select(channel => new KeyValuePair<string, double>(channel,
                         Math.Abs(snapshot.Values[channel] - ambient)))
@@ -320,6 +381,7 @@ static async Task<int> RunAsync(string[] args)
                 bool ambientReached = worstAmbientDifference.Value <= options.AmbientToleranceC;
 
                 CheckSafetyLimit(snapshot, temperatureChannels, options.SafetyMaximumTemperatureC);
+                // Safety net: never wait longer than --max-cooling-min for ambient to be reached.
                 if (coolingTimer.Elapsed >= TimeSpan.FromMinutes(options.MaximumCoolingMinutes))
                 {
                     throw new TimeoutException(
@@ -344,6 +406,9 @@ static async Task<int> RunAsync(string[] args)
                     plotTimer.Restart();
                 }
 
+                // The program never advances on a fixed timer alone - it only proceeds
+                // once the minimum cooling time has passed AND temperatures are both
+                // stable and close enough to ambient.
                 if (minimumCoolingElapsed && coolingEquilibrium.IsEquilibrium && ambientReached)
                 {
                     Console.ForegroundColor = ConsoleColor.Green;
@@ -358,6 +423,8 @@ static async Task<int> RunAsync(string[] args)
                 await Task.Delay(livePollInterval, cancellation.Token);
             }
 
+            // --- Export phase: stop the LR8400, download the full recording for
+            // this run, then write the CSV and the final (non-live) SVG plots.
             Console.WriteLine("Stopping LR8400 and waiting for storage to finish.");
             await logger.StopAndWaitForIdleAsync(TimeSpan.FromSeconds(30), cancellation.Token);
             measurementStarted = false;
@@ -411,18 +478,22 @@ static async Task<int> RunAsync(string[] args)
     }
     catch (OperationCanceledException)
     {
+        // Reached when the user pressed Ctrl+C (see the CancelKeyPress handler above).
         Console.Error.WriteLine("Acquisition cancelled.");
         WriteStatus(liveStatusPath, "CANCELLED - heater shutdown requested");
         return 3;
     }
     catch (Exception exception)
     {
+        // Any other failure (instrument error, timeout, safety cutoff, ...).
         Console.Error.WriteLine($"ERROR: {exception.Message}");
         WriteStatus(liveStatusPath, "ERROR: " + exception.Message);
         return 1;
     }
     finally
     {
+        // This block always runs, on the success path, an exception, or a
+        // cancellation, so the heater is never left energised when the process exits.
         if (heater.IsOpen)
         {
             try
@@ -453,10 +524,15 @@ static async Task<int> RunAsync(string[] args)
     }
 }
 
+// Builds an equilibrium detector configured from the shared CLI options
+// (window length, max span, max slope) for a given set of channels.
 static EquilibriumDetector NewEquilibriumDetector(IReadOnlyList<string> channels, Options options) =>
     new(channels, TimeSpan.FromMinutes(options.EquilibriumWindowMinutes),
         options.MaximumSpanC, options.MaximumSlopeCPerMinute);
 
+// Picks the temperature used to decide "is this device hot enough yet?".
+// "HOTTEST" scans every equilibrium channel and picks the highest reading;
+// otherwise it reads one specific configured channel (e.g. CH1_1).
 static KeyValuePair<string, double> ResolveTriggerTemperature(
     TemperatureSnapshot snapshot,
     IReadOnlyList<string> equilibriumChannels,
@@ -467,6 +543,9 @@ static KeyValuePair<string, double> ResolveTriggerTemperature(
             .MaxBy(item => item.Value)
         : new KeyValuePair<string, double>(configuredChannel, snapshot.Values[configuredChannel]);
 
+// Hard overtemperature cutoff. No-op unless --safety-max-c was supplied.
+// Throws if any temperature channel is at or above the limit, which unwinds
+// straight into the finally block above and switches the heater off.
 static void CheckSafetyLimit(
     TemperatureSnapshot snapshot,
     IReadOnlyList<string> temperatureChannels,
@@ -484,6 +563,7 @@ static void CheckSafetyLimit(
     }
 }
 
+// Refreshes the two live SVG files that live-dashboard.html polls and displays.
 static void WriteLivePlots(
     string temperaturePath,
     string voltagePath,
@@ -499,6 +579,9 @@ static void WriteLivePlots(
         title + " voltages", "Voltage (V)");
 }
 
+// Waits out the configured post-trigger window, then stops and downloads the
+// waveform from every armed RTH scope. Failures here are logged as warnings
+// only - a scope export problem must never abort the LR8400 cooling phase.
 static async Task ExportScopeCaptureAsync(
     RthScopeCoordinator scopes,
     string outputDirectory,
@@ -531,6 +614,9 @@ static async Task ExportScopeCaptureAsync(
     }
 }
 
+// Reads one "live" (not-yet-downloaded) sample for every requested channel.
+// The LR8400 API returns live values per unit (1 or 2), so this groups the
+// requested channels by unit number first and issues one query per unit.
 static async Task<TemperatureSnapshot> ReadSnapshotAsync(
     Lr8400Client logger,
     IReadOnlyList<string> channels,
@@ -563,6 +649,8 @@ static async Task<TemperatureSnapshot> ReadSnapshotAsync(
     return new TemperatureSnapshot(DateTimeOffset.UtcNow, selected);
 }
 
+// Polls :STATUS? until the LR8400 confirms it is actually recording after
+// START, or throws if it doesn't get there within the timeout.
 static async Task WaitForRecordingStateAsync(
     Lr8400Client logger, TimeSpan timeout, CancellationToken cancellationToken)
 {
@@ -579,6 +667,7 @@ static async Task WaitForRecordingStateAsync(
         $"The LR8400 did not enter a recording state after START (last status: {lastStatus}).");
 }
 
+// Formats a samples-per-second value with the most readable unit (Sa/s, kSa/s, ...).
 static string FormatRate(double rate) => rate switch
 {
     >= 1e9 => $"{rate / 1e9:0.###} GSa/s",
@@ -591,6 +680,8 @@ static string FormatRate(double rate) => rate switch
 static void WriteStatus(string path, string status) =>
     File.WriteAllText(path, $"{DateTimeOffset.UtcNow:O}  {status}\n", new UTF8Encoding(false));
 
+// Writes the static HTML shell that auto-refreshes the two live SVG images
+// and the status text every 5 seconds. Written once at startup.
 static void WriteLiveDashboard(string path)
 {
     const string html = """
@@ -607,11 +698,13 @@ static void WriteLiveDashboard(string path)
     File.WriteAllText(path, html, new UTF8Encoding(false));
 }
 
+// One entry per physical device position/type. "All" is the fixed batch order
+// used by --all-devices; ForDevice looks up the entry for a single --device run.
 file sealed record DeviceRun(
     string FolderName, string DisplayName, HeaterDevice Device, MonitorRelaySelection MonitorRelay)
 {
     /// <summary>
-    ///  IReadOnlyList sets up the relays to be turned on. 
+    ///  IReadOnlyList sets up the relays to be turned on.
     /// </summary>
     public static IReadOnlyList<DeviceRun> All { get; } =
     [
@@ -629,6 +722,8 @@ file sealed record DeviceRun(
         new("12_WL_FRD", "W lower diode/FRD", HeaterDevice.DiodeWLower, MonitorRelaySelection.None)
     ];
 
+    // Single-device runs reuse the same table but strip the "NN_" batch-order
+    // prefix from the folder name, since there's no batch sequence to number.
     public static DeviceRun ForDevice(HeaterDevice device)
     {
         DeviceRun match = All.First(item => item.Device == device);
@@ -636,6 +731,9 @@ file sealed record DeviceRun(
     }
 }
 
+// All parsed command-line settings, as one immutable record. See Parse() below
+// for how each field is read from argv, and PrintUsage() for the full list of
+// flags with their defaults.
 file sealed record Options(
     string Host, int Port, string ArduinoPort, int ArduinoBaudRate, bool AllDevices,
     HeaterDevice? HeaterDevice, double RelaySettleSeconds, double MaximumHeatingMinutes,
@@ -650,8 +748,13 @@ file sealed record Options(
     double MaximumSpanC, double MaximumSlopeCPerMinute, double LivePlotRefreshSeconds,
     string OutputDirectory, bool ShowHelp)
 {
+    // Turns argv into an Options instance. Throws ArgumentException/ArgumentOutOfRangeException
+    // on any invalid combination; RunAsync catches that and prints usage instead of continuing.
     public static Options Parse(string[] args)
     {
+        // First pass: collect raw "--flag value" pairs into a lookup. A handful of
+        // flags (--help, --all-devices, --preserve-input-settings) are boolean
+        // switches with no following value, so they're special-cased here.
         Dictionary<string, string?> values = new(StringComparer.OrdinalIgnoreCase);
         for (int index = 0; index < args.Length; index++)
         {
@@ -678,12 +781,17 @@ file sealed record Options(
         if (!help && allDevices == (device is not null))
             throw new ArgumentException("Supply exactly one of --all-devices or --device NAME.");
 
+        // Which temperature reading decides "hot enough": either the single
+        // hottest CH1 channel (HOTTEST, the --all-devices default) or one fixed
+        // channel name. Must be within the 12 channels actually recorded.
         string triggerChannel = Get(values, "--trigger-channel", allDevices ? "HOTTEST" : "CH1_1")!
             .ToUpperInvariant();
         if (triggerChannel != "HOTTEST" &&
             !Enumerable.Range(1, 12).Select(n => $"CH1_{n}").Contains(triggerChannel))
             throw new ArgumentException("--trigger-channel must be HOTTEST or CH1_1 through CH1_12.");
 
+        // Optional RTH scope configuration; leaving --scope1/--scope2 unset means
+        // BuildScopeDefinitions() later returns an empty list and no scope is used.
         string? scope1Resource = Get(values, "--scope1", null);
         string? scope2Resource = Get(values, "--scope2", null);
         double? scope1Level = GetOptionalDouble(values, "--scope1-trigger-level-v");
@@ -694,6 +802,8 @@ file sealed record Options(
         int scopeReference = GetInt(values, "--scope-reference-percent", 50);
         if (scopeReference is not (10 or 50 or 90))
             throw new ArgumentException("--scope-reference-percent must be 10, 50 or 90.");
+        // Pre/post-trigger wait defaults are derived from the scope range and
+        // reference percentage, with a small safety margin added on each side.
         double defaultPreFillMs = scopeRangeMs * scopeReference / 100.0 + 50;
         double defaultPostWaitMs = scopeRangeMs * (1.0 - scopeReference / 100.0) + 100;
         string timestamp = DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
@@ -718,9 +828,12 @@ file sealed record Options(
             Get(values, "--output", Path.Combine("HiokiRuns", timestamp))!, help);
     }
 
+    // All twelve devices (batch order) or just the one --device that was requested.
     public IReadOnlyList<DeviceRun> BuildRunPlan() =>
         AllDevices ? DeviceRun.All : [DeviceRun.ForDevice(HeaterDevice!.Value)];
 
+    // Zero, one or two RTH scope definitions, depending on which --scopeN flags
+    // were supplied. An empty list disables all scope-related code in RunAsync.
     public IReadOnlyList<RthScopeDefinition> BuildScopeDefinitions()
     {
         List<RthScopeDefinition> definitions = [];
@@ -776,11 +889,15 @@ file sealed record Options(
           --scope-output-us 125
         """);
 
+    // --- Small parsing/validation helpers used only by Parse() above ---------
+
     private static string? Get(IReadOnlyDictionary<string, string?> values, string name, string? fallback) =>
         values.TryGetValue(name, out string? value) ? value : fallback;
     private static int GetInt(IReadOnlyDictionary<string, string?> values, string name, int fallback) =>
         int.Parse(Get(values, name, fallback.ToString(CultureInfo.InvariantCulture))!, CultureInfo.InvariantCulture);
 
+    // Parses a positive double option, throwing if it's missing, non-numeric,
+    // non-finite, or not greater than zero.
     private static double GetDouble(IReadOnlyDictionary<string, string?> values, string name, double fallback)
     {
         double value = double.Parse(Get(values, name, fallback.ToString(CultureInfo.InvariantCulture))!,
@@ -790,6 +907,8 @@ file sealed record Options(
         return value;
     }
 
+    // Same as GetDouble but allows zero (used for --min-cooling-min, where 0 is
+    // a valid "skip the minimum wait" value for quick bench trials).
     private static double GetNonNegativeDouble(
         IReadOnlyDictionary<string, string?> values, string name, double fallback)
     {
@@ -800,6 +919,7 @@ file sealed record Options(
         return value;
     }
 
+    // Returns null when the flag wasn't supplied at all, instead of throwing.
     private static double? GetOptionalDouble(IReadOnlyDictionary<string, string?> values, string name)
     {
         string? text = Get(values, name, null);
@@ -809,6 +929,8 @@ file sealed record Options(
         return value;
     }
 
+    // A scope's resource string and trigger level must be supplied together or
+    // not at all, and the trigger level must fall within the instrument's ±10 V input range.
     private static void ValidateScopePair(string name, string? resource, double? triggerLevel)
     {
         if ((resource is null) != (triggerLevel is null))
@@ -817,6 +939,7 @@ file sealed record Options(
             throw new ArgumentOutOfRangeException($"--{name}-trigger-level-v", "Must be -10 V to +10 V.");
     }
 
+    // A scope trigger source is either an analogue channel C1-C4 or a digital line D0-D7.
     private static string ParseScopeTriggerSource(string text)
     {
         string source = text.Trim().ToUpperInvariant();
@@ -826,6 +949,8 @@ file sealed record Options(
         return source;
     }
 
+    // Parses a comma-separated list like "1,2,3,4" into distinct, sorted scope
+    // analogue-channel numbers, each of which must be between 1 and 4.
     private static int[] ParseScopeChannels(string text)
     {
         int[] channels = text.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
@@ -835,6 +960,8 @@ file sealed record Options(
         return channels;
     }
 
+    // Accepts --device either as a 1-based index into HeaterDevice or as a
+    // (punctuation/case-insensitive) name match, e.g. "igbt-u-upper" or "IgbtUUpper".
     private static HeaterDevice ParseHeaterDevice(string text)
     {
         if (int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out int number) &&
