@@ -6,7 +6,9 @@ LINQ) but no prior knowledge of this project, the Hioki LR8400, or the
 electronics being tested.
 
 If you just want to run the program, read `README.md` instead — this file
-is about *how the code works*, not *how to use it*.
+is about *how the code works*, not *how to use it*. If async/await, records
+or LINQ themselves are unfamiliar, see `CSHARP_CONCEPTS_GUIDE.md` instead —
+this file assumes you already know that syntax.
 
 ## 1. What this program actually does
 
